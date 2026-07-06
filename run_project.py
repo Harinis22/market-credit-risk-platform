@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from src.credit_risk import assign_risk_band, generate_synthetic_credit_data, train_credit_models
 from src.market_risk import calculate_returns, market_risk_summary, portfolio_returns
@@ -52,6 +53,17 @@ def main():
     port_returns = portfolio_returns(returns, weights)
 
     summary = market_risk_summary(port_returns)
+    
+    cumulative_returns = (1 + port_returns).cumprod()
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(cumulative_returns)
+    plt.title("Portfolio Cumulative Return")
+    plt.xlabel("Date")
+    plt.ylabel("Growth of $1")
+    plt.tight_layout()
+    plt.savefig("images/portfolio_cumulative_return.png")
+    plt.close()
 
     for metric, value in summary.items():
         print(f"{metric:28s}: {value:.4f}")
@@ -69,6 +81,14 @@ def main():
     )
 
     mc_summary = monte_carlo_loss_summary(paths, current_portfolio_value)
+    plt.figure(figsize=(10, 5))
+    plt.plot(paths.iloc[:, :100])
+    plt.title("Monte Carlo Portfolio Simulation - First 100 Paths")
+    plt.xlabel("Trading Days")
+    plt.ylabel("Portfolio Value")
+    plt.tight_layout()
+    plt.savefig("images/monte_carlo_paths.png")
+    plt.close()
 
     for metric, value in mc_summary.items():
         print(f"{metric:28s}: {value:,.2f}")
@@ -98,6 +118,15 @@ def main():
     )
 
     print(ecl_summary.to_string(index=False))
+    plt.figure(figsize=(10, 5))
+    plt.bar(ecl_summary["scenario"], ecl_summary["expected_credit_loss"])
+    plt.title("Expected Credit Loss by Stress Scenario")
+    plt.xlabel("Scenario")
+    plt.ylabel("Expected Credit Loss")
+    plt.xticks(rotation=20)
+    plt.tight_layout()
+    plt.savefig("images/expected_credit_loss_scenarios.png")
+    plt.close()
 
 
 if __name__ == "__main__":
