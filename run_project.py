@@ -1,115 +1,79 @@
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
-from src.credit_risk import assign_risk_band, generate_synthetic_credit_data, train_credit_models
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+
+from src.credit_risk import generate_synthetic_credit_data, train_credit_models
 from src.market_risk import calculate_returns, market_risk_summary, portfolio_returns
-from src.simulation import credit_stress_scenarios, monte_carlo_loss_summary, monte_carlo_portfolio_paths
+from src.simulation import (
+    credit_stress_scenarios,
+    monte_carlo_loss_summary,
+    monte_carlo_portfolio_paths,
+)
 
 
-def generate_synthetic_prices(days=756, seed=42):
-    rng = np.random.default_rng(seed)
+def load_yfinance_prices(tickers, period="5y", interval="1d"):
+    """Download real historical adjusted closing prices from yfinance."""
+    if not YFINANCE_AVAILABLE:
+        raise ImportError("Install yfinance first: python -m pip install yfinance")
 
-    tickers = ["SPY", "QQQ", "IWM", "JPM", "MSFT"]
-
-    assumptions = {
-        "SPY": (0.00035, 0.011),
-        "QQQ": (0.00045, 0.014),
-        "IWM": (0.00030, 0.016),
-        "JPM": (0.00032, 0.015),
-        "MSFT": (0.00050, 0.014),
-    }
-
-    prices = pd.DataFrame(
-        index=pd.date_range(
-            end=pd.Timestamp.today(),
-            periods=days,
-            freq="B",
-        )
+    data = yf.download(
+        tickers=tickers,
+        period=period,
+        interval=interval,
+        auto_adjust=True,
+        progress=False,
+        group_by="column",
     )
 
-    for ticker in tickers:
-        mean_return, volatility = assumptions[ticker]
-        daily_returns = rng.normal(mean_return, volatility, days)
-        prices[ticker] = 100 * np.cumprod(1 + daily_returns)
+    if isinstance(data.columns, pd.MultiIndex):
+        prices = data["Close"]
+    else:
+        prices = data[["Close"]].rename(columns={"Close": tickers[0]})
 
-    return prices
-
-
-def print_section(title):
-    print()
-    print("=" * 80)
-    print(title)
-    print("=" * 80)
+    return prices.dropna(how="all").ffill().dropna()
 
 
 def main():
-    print_section("MARKET RISK ANALYSIS")
+    tickers = ["SPY", "QQQ", "IWM", "JPM", "MSFT", "GLD", "TLT"]
+    weights = np.array([0.30, 0.20, 0.10, 0.10, 0.10, 0.10, 0.10])
 
-    prices = generate_synthetic_prices()
+    prices = load_yfinance_prices(tickers=tickers, period="5y")
     returns = calculate_returns(prices)
-
-    weights = np.array([0.35, 0.20, 0.15, 0.15, 0.15])
     port_returns = portfolio_returns(returns, weights)
 
-    summary = market_risk_summary(port_returns)
-    
-    cumulative_returns = (1 + port_returns).cumprod()
+    risk_summary = market_risk_summary(port_returns)
 
-    plt.figure(figsize=(10, 5))
-    plt.plot(cumulative_returns)
-    plt.title("Portfolio Cumulative Return")
-    plt.xlabel("Date")
-    plt.ylabel("Growth of $1")
-    plt.tight_layout()
-    plt.savefig("images/portfolio_cumulative_return.png")
-    plt.close()
-
-    for metric, value in summary.items():
-        print(f"{metric:28s}: {value:.4f}")
-
-    print_section("MONTE CARLO PORTFOLIO SIMULATION")
-
-    current_portfolio_value = 100000
+    print("\nMARKET RISK SUMMARY")
+    for metric, value in risk_summary.items():
+        print(f"{metric}: {value}")
 
     paths = monte_carlo_portfolio_paths(
-        current_value=current_portfolio_value,
+        current_value=100000,
         mean_daily_return=port_returns.mean(),
         daily_volatility=port_returns.std(),
         days=252,
-        simulations=10000,
+        simulations=5000,
     )
 
-    mc_summary = monte_carlo_loss_summary(paths, current_portfolio_value)
-    plt.figure(figsize=(10, 5))
-    plt.plot(paths.iloc[:, :100])
-    plt.title("Monte Carlo Portfolio Simulation - First 100 Paths")
-    plt.xlabel("Trading Days")
-    plt.ylabel("Portfolio Value")
-    plt.tight_layout()
-    plt.savefig("images/monte_carlo_paths.png")
-    plt.close()
+    mc_summary = monte_carlo_loss_summary(paths, starting_value=100000)
 
+    print("\nMONTE CARLO LOSS SUMMARY")
     for metric, value in mc_summary.items():
-        print(f"{metric:28s}: {value:,.2f}")
-
-    print_section("CREDIT RISK MODELING")
+        print(f"{metric}: {value}")
 
     credit_df = generate_synthetic_credit_data(rows=2500)
-    model_results = train_credit_models(credit_df)
+    model_results, comparison_df, best_model_name, best_result = train_credit_models(credit_df)
 
-    best_model_name = max(model_results, key=lambda name: model_results[name]["roc_auc"])
-    best_result = model_results[best_model_name]
+    print("\nCREDIT MODEL COMPARISON")
+    print(comparison_df)
 
-    print(f"Best model: {best_model_name}")
-    print(f"ROC-AUC   : {best_result['roc_auc']:.4f}")
-    print(f"Confusion Matrix: {best_result['confusion_matrix']}")
-
-    avg_pd = float(np.mean(best_result["test_pd"]))
-    print(f"Average predicted PD: {avg_pd:.4f}")
-    print(f"Sample borrower risk band: {assign_risk_band(avg_pd)}")
-
-    print_section("CREDIT LOSS STRESS TESTING")
+    print(f"\nBEST CREDIT MODEL: {best_model_name}")
+    print(f"ROC-AUC: {best_result['roc_auc']:.4f}")
 
     ecl_summary = credit_stress_scenarios(
         base_pd=best_result["test_pd"],
@@ -117,16 +81,8 @@ def main():
         lgd=0.45,
     )
 
-    print(ecl_summary.to_string(index=False))
-    plt.figure(figsize=(10, 5))
-    plt.bar(ecl_summary["scenario"], ecl_summary["expected_credit_loss"])
-    plt.title("Expected Credit Loss by Stress Scenario")
-    plt.xlabel("Scenario")
-    plt.ylabel("Expected Credit Loss")
-    plt.xticks(rotation=20)
-    plt.tight_layout()
-    plt.savefig("images/expected_credit_loss_scenarios.png")
-    plt.close()
+    print("\nEXPECTED CREDIT LOSS SCENARIOS")
+    print(ecl_summary)
 
 
 if __name__ == "__main__":

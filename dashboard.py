@@ -4,29 +4,22 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    accuracy_score,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-
 try:
     import shap
     SHAP_AVAILABLE = True
 except ImportError:
     SHAP_AVAILABLE = False
 
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+
 from src.credit_risk import (
     assign_risk_band,
     generate_synthetic_credit_data,
+    train_credit_models,
 )
 from src.market_risk import (
     calculate_returns,
@@ -51,7 +44,7 @@ def generate_synthetic_prices(days=756, seed=42):
     """Create synthetic daily prices for a diversified multi-asset portfolio."""
     rng = np.random.default_rng(seed)
 
-    tickers = ["SPY", "QQQ", "IWM", "JPM", "MSFT"]
+    tickers = ["SPY", "QQQ", "IWM", "JPM", "MSFT", "GLD", "TLT"]
 
     assumptions = {
         "SPY": (0.00035, 0.011),
@@ -59,6 +52,8 @@ def generate_synthetic_prices(days=756, seed=42):
         "IWM": (0.00030, 0.016),
         "JPM": (0.00032, 0.015),
         "MSFT": (0.00050, 0.014),
+        "GLD": (0.00020, 0.010),
+        "TLT": (0.00015, 0.012),
     }
 
     prices = pd.DataFrame(
@@ -77,99 +72,79 @@ def generate_synthetic_prices(days=756, seed=42):
     return prices
 
 
-def train_credit_models_with_comparison(df):
-    """Train Logistic Regression and Random Forest and return a comparison-ready result."""
-    features = [
-        "annual_income",
-        "loan_amount",
-        "interest_rate",
-        "debt_to_income",
-        "delinquencies",
-        "credit_history_years",
-        "utilization",
-    ]
+def load_yfinance_prices(tickers, period="5y", interval="1d"):
+    """Download real historical adjusted closing prices from yfinance."""
+    if not YFINANCE_AVAILABLE:
+        raise ImportError(
+            "yfinance is not installed. Add yfinance>=0.2.40 to requirements.txt."
+        )
 
-    X = df[features]
-    y = df["default"]
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=0.25,
-        random_state=42,
-        stratify=y,
+    data = yf.download(
+        tickers=tickers,
+        period=period,
+        interval=interval,
+        auto_adjust=True,
+        progress=False,
+        group_by="column",
     )
 
-    logistic_model = Pipeline(
-        steps=[
-            ("scaler", StandardScaler()),
-            ("model", LogisticRegression(max_iter=1000)),
-        ]
-    )
+    if data.empty:
+        raise ValueError("No data returned from yfinance. Try fewer tickers or another period.")
 
-    random_forest = RandomForestClassifier(
-        n_estimators=250,
-        max_depth=6,
-        random_state=42,
-        class_weight="balanced",
-    )
+    if isinstance(data.columns, pd.MultiIndex):
+        if "Close" in data.columns.get_level_values(0):
+            prices = data["Close"]
+        else:
+            raise ValueError("Could not find Close prices in yfinance response.")
+    else:
+        prices = data[["Close"]].rename(columns={"Close": tickers[0]})
 
-    models = {
-        "Logistic Regression": logistic_model,
-        "Random Forest": random_forest,
+    prices = prices.dropna(how="all").ffill().dropna()
+
+    if prices.empty:
+        raise ValueError("Price data is empty after cleaning.")
+
+    return prices
+
+
+def get_market_prices(data_source, days, tickers, period):
+    """Return market price data from either synthetic generator or yfinance."""
+    if data_source == "Real market data from yfinance":
+        return load_yfinance_prices(tickers=tickers, period=period, interval="1d")
+
+    return generate_synthetic_prices(days=days)
+
+
+def align_weights_to_prices(prices):
+    """Create default portfolio weights aligned to the available ticker columns."""
+    default_weights = {
+        "SPY": 0.30,
+        "QQQ": 0.20,
+        "IWM": 0.10,
+        "JPM": 0.10,
+        "MSFT": 0.10,
+        "GLD": 0.10,
+        "TLT": 0.10,
     }
 
-    results = {}
+    columns = list(prices.columns)
 
-    for name, model in models.items():
-        model.fit(X_train, y_train)
-        pd_scores = model.predict_proba(X_test)[:, 1]
-        predictions = (pd_scores >= 0.50).astype(int)
-
-        results[name] = {
-            "model": model,
-            "roc_auc": float(roc_auc_score(y_test, pd_scores)),
-            "accuracy": float(accuracy_score(y_test, predictions)),
-            "precision": float(precision_score(y_test, predictions, zero_division=0)),
-            "recall": float(recall_score(y_test, predictions, zero_division=0)),
-            "f1_score": float(f1_score(y_test, predictions, zero_division=0)),
-            "confusion_matrix": confusion_matrix(y_test, predictions).tolist(),
-            "test_pd": pd_scores,
-            "test_ead": X_test["loan_amount"].to_numpy(),
-            "X_train": X_train,
-            "X_test": X_test,
-            "y_train": y_train,
-            "y_test": y_test,
-            "features": features,
-        }
-
-    comparison_df = pd.DataFrame(
-        [
-            {
-                "Model": name,
-                "ROC-AUC": values["roc_auc"],
-                "Accuracy": values["accuracy"],
-                "Precision": values["precision"],
-                "Recall": values["recall"],
-                "F1 Score": values["f1_score"],
-            }
-            for name, values in results.items()
-        ]
+    raw_weights = np.array(
+        [default_weights.get(ticker, 1.0 / len(columns)) for ticker in columns],
+        dtype=float,
     )
 
-    best_model_name = comparison_df.sort_values("ROC-AUC", ascending=False).iloc[0]["Model"]
-    best_result = results[best_model_name]
-
-    return results, comparison_df, best_model_name, best_result
+    weights = raw_weights / raw_weights.sum()
+    return weights
 
 
-@st.cache_data
-def load_project_outputs(days, portfolio_value, simulations):
+@st.cache_data(show_spinner=True)
+def load_project_outputs(data_source, days, portfolio_value, simulations, tickers, period):
     """Run project calculations and cache dashboard outputs."""
-    prices = generate_synthetic_prices(days=days)
-    returns = calculate_returns(prices)
+    prices = get_market_prices(data_source, days, tickers, period)
 
-    weights = np.array([0.35, 0.20, 0.15, 0.15, 0.15])
+    returns = calculate_returns(prices)
+    weights = align_weights_to_prices(prices)
     port_returns = portfolio_returns(returns, weights)
 
     risk_summary = market_risk_summary(port_returns)
@@ -185,7 +160,7 @@ def load_project_outputs(days, portfolio_value, simulations):
     mc_summary = monte_carlo_loss_summary(paths, portfolio_value)
 
     credit_df = generate_synthetic_credit_data(rows=2500)
-    model_results, comparison_df, best_model_name, best_result = train_credit_models_with_comparison(credit_df)
+    model_results, comparison_df, best_model_name, best_result = train_credit_models(credit_df)
 
     ecl_summary = credit_stress_scenarios(
         base_pd=best_result["test_pd"],
@@ -195,6 +170,7 @@ def load_project_outputs(days, portfolio_value, simulations):
 
     return {
         "prices": prices,
+        "weights": weights,
         "returns": returns,
         "portfolio_returns": port_returns,
         "risk_summary": risk_summary,
@@ -212,11 +188,34 @@ def load_project_outputs(days, portfolio_value, simulations):
 st.title("Integrated Market & Credit Risk Simulation Platform")
 
 st.caption(
-    "Interactive Python dashboard combining market risk metrics, Monte Carlo simulation, "
-    "credit default prediction, model comparison, SHAP explainability, and expected credit loss stress testing."
+    "Interactive Python dashboard combining real yfinance market data, market risk metrics, "
+    "Monte Carlo simulation, credit default prediction, model comparison, SHAP explainability, "
+    "and expected credit loss stress testing."
 )
 
 st.sidebar.header("Dashboard Controls")
+
+data_source = st.sidebar.radio(
+    "Market Data Source",
+    ["Synthetic demo data", "Real market data from yfinance"],
+    index=1,
+)
+
+default_tickers = "SPY,QQQ,IWM,JPM,MSFT,GLD,TLT"
+
+ticker_text = st.sidebar.text_input(
+    "Ticker List",
+    value=default_tickers,
+    help="Used only when yfinance mode is selected.",
+)
+
+tickers = [ticker.strip().upper() for ticker in ticker_text.split(",") if ticker.strip()]
+
+period = st.sidebar.selectbox(
+    "yfinance Historical Period",
+    ["1y", "2y", "5y", "10y"],
+    index=2,
+)
 
 portfolio_value = st.sidebar.number_input(
     "Portfolio Value",
@@ -227,7 +226,7 @@ portfolio_value = st.sidebar.number_input(
 )
 
 days = st.sidebar.slider(
-    "Historical Price Days",
+    "Synthetic Historical Price Days",
     min_value=252,
     max_value=1260,
     value=756,
@@ -242,12 +241,33 @@ simulations = st.sidebar.slider(
     step=1000,
 )
 
-outputs = load_project_outputs(days, portfolio_value, simulations)
+if data_source == "Real market data from yfinance" and not YFINANCE_AVAILABLE:
+    st.error(
+        "yfinance is not installed. Add `yfinance>=0.2.40` to requirements.txt, "
+        "then run `python -m pip install -r requirements.txt`."
+    )
+    st.stop()
+
+try:
+    outputs = load_project_outputs(
+        data_source=data_source,
+        days=days,
+        portfolio_value=portfolio_value,
+        simulations=simulations,
+        tickers=tickers,
+        period=period,
+    )
+except Exception as exc:
+    st.error(f"Could not load market data: {exc}")
+    st.info("Switch to synthetic demo data or check your ticker symbols and internet connection.")
+    st.stop()
 
 risk_summary = outputs["risk_summary"]
 mc_summary = outputs["mc_summary"]
 paths = outputs["paths"]
 port_returns = outputs["portfolio_returns"]
+prices = outputs["prices"]
+weights = outputs["weights"]
 credit_df = outputs["credit_df"]
 best_result = outputs["best_result"]
 best_model_name = outputs["best_model_name"]
@@ -285,6 +305,38 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 with tab1:
     st.subheader("Market Risk Analysis")
 
+    st.write(f"Market Data Source: **{data_source}**")
+
+    if data_source == "Real market data from yfinance":
+        st.success(
+            "Using real historical adjusted closing prices from yfinance for the market-risk module."
+        )
+    else:
+        st.info(
+            "Using synthetic market data for stable demos. Switch to yfinance mode for real historical prices."
+        )
+
+    st.write("Portfolio Weights")
+    weight_df = pd.DataFrame(
+        {
+            "Ticker": list(prices.columns),
+            "Weight": weights,
+        }
+    )
+    st.dataframe(weight_df, use_container_width=True)
+
+    st.write("Recent Price Data")
+    st.dataframe(prices.tail(10), use_container_width=True)
+
+    normalized_prices = prices / prices.iloc[0]
+
+    price_fig = px.line(
+        normalized_prices,
+        title="Normalized Price Performance",
+        labels={"value": "Growth of $1", "index": "Date"},
+    )
+    st.plotly_chart(price_fig, use_container_width=True)
+
     cumulative_returns = (1 + port_returns).cumprod()
 
     fig = px.line(
@@ -311,6 +363,14 @@ with tab1:
         labels={"value": "Daily Return"},
     )
     st.plotly_chart(returns_fig, use_container_width=True)
+
+    correlation_fig = px.imshow(
+        outputs["returns"].corr(),
+        text_auto=True,
+        title="Asset Return Correlation Matrix",
+        labels=dict(color="Correlation"),
+    )
+    st.plotly_chart(correlation_fig, use_container_width=True)
 
     st.info(
         "Observation: most returns cluster around the average, while the far-left tail represents downside-risk observations. "
@@ -523,7 +583,7 @@ with tab5:
         ### Resume Bullet
 
         Built an integrated **Market & Credit Risk Simulation Platform** using Python, Pandas, NumPy,
-        Scikit-learn, Monte Carlo simulation, Streamlit, and SHAP explainability to estimate VaR,
+        Scikit-learn, yfinance, Monte Carlo simulation, Streamlit, and SHAP explainability to estimate VaR,
         Expected Shortfall, portfolio drawdown risk, borrower default probability, model performance,
         feature-level risk drivers, and expected credit loss under baseline, high-rate, and recession stress scenarios.
 
@@ -531,8 +591,9 @@ with tab5:
 
         This project demonstrates a combined market risk and credit risk workflow.
 
-        For **market risk**, the dashboard calculates daily returns, volatility, Sharpe ratio,
-        maximum drawdown, VaR, and Expected Shortfall for a synthetic multi-asset portfolio.
+        For **market risk**, the dashboard can use real historical adjusted closing prices from yfinance
+        for SPY, QQQ, IWM, JPM, MSFT, GLD, and TLT. It calculates daily returns, volatility,
+        Sharpe ratio, maximum drawdown, VaR, Expected Shortfall, and asset correlations.
 
         For **simulation**, it applies Monte Carlo methods to generate thousands of future
         portfolio paths and estimate downside loss exposure.
@@ -548,5 +609,10 @@ with tab5:
 
         For **stress testing**, it uses PD, LGD, and EAD to calculate Expected Credit Loss
         under baseline, high-rate, mild recession, and severe recession scenarios.
+
+        ### Important Interview Note
+
+        The market-risk section can use real yfinance market data. The credit-risk section uses
+        synthetic borrower data to demonstrate the workflow safely without exposing private loan records.
         """
     )
