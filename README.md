@@ -1,1 +1,8 @@
 # market-credit-risk-platform
+
+@"
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.3
+matplotlib>=3.7
+"@ | Set-Content requirements.txt
