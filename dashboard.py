@@ -4,10 +4,29 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+try:
+    import shap
+    SHAP_AVAILABLE = True
+except ImportError:
+    SHAP_AVAILABLE = False
+
 from src.credit_risk import (
     assign_risk_band,
     generate_synthetic_credit_data,
-    train_credit_models,
 )
 from src.market_risk import (
     calculate_returns,
@@ -29,7 +48,7 @@ st.set_page_config(
 
 
 def generate_synthetic_prices(days=756, seed=42):
-    """Create synthetic daily prices for a diversified portfolio."""
+    """Create synthetic daily prices for a diversified multi-asset portfolio."""
     rng = np.random.default_rng(seed)
 
     tickers = ["SPY", "QQQ", "IWM", "JPM", "MSFT"]
@@ -58,9 +77,95 @@ def generate_synthetic_prices(days=756, seed=42):
     return prices
 
 
+def train_credit_models_with_comparison(df):
+    """Train Logistic Regression and Random Forest and return a comparison-ready result."""
+    features = [
+        "annual_income",
+        "loan_amount",
+        "interest_rate",
+        "debt_to_income",
+        "delinquencies",
+        "credit_history_years",
+        "utilization",
+    ]
+
+    X = df[features]
+    y = df["default"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.25,
+        random_state=42,
+        stratify=y,
+    )
+
+    logistic_model = Pipeline(
+        steps=[
+            ("scaler", StandardScaler()),
+            ("model", LogisticRegression(max_iter=1000)),
+        ]
+    )
+
+    random_forest = RandomForestClassifier(
+        n_estimators=250,
+        max_depth=6,
+        random_state=42,
+        class_weight="balanced",
+    )
+
+    models = {
+        "Logistic Regression": logistic_model,
+        "Random Forest": random_forest,
+    }
+
+    results = {}
+
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        pd_scores = model.predict_proba(X_test)[:, 1]
+        predictions = (pd_scores >= 0.50).astype(int)
+
+        results[name] = {
+            "model": model,
+            "roc_auc": float(roc_auc_score(y_test, pd_scores)),
+            "accuracy": float(accuracy_score(y_test, predictions)),
+            "precision": float(precision_score(y_test, predictions, zero_division=0)),
+            "recall": float(recall_score(y_test, predictions, zero_division=0)),
+            "f1_score": float(f1_score(y_test, predictions, zero_division=0)),
+            "confusion_matrix": confusion_matrix(y_test, predictions).tolist(),
+            "test_pd": pd_scores,
+            "test_ead": X_test["loan_amount"].to_numpy(),
+            "X_train": X_train,
+            "X_test": X_test,
+            "y_train": y_train,
+            "y_test": y_test,
+            "features": features,
+        }
+
+    comparison_df = pd.DataFrame(
+        [
+            {
+                "Model": name,
+                "ROC-AUC": values["roc_auc"],
+                "Accuracy": values["accuracy"],
+                "Precision": values["precision"],
+                "Recall": values["recall"],
+                "F1 Score": values["f1_score"],
+            }
+            for name, values in results.items()
+        ]
+    )
+
+    best_model_name = comparison_df.sort_values("ROC-AUC", ascending=False).iloc[0]["Model"]
+    best_result = results[best_model_name]
+
+    return results, comparison_df, best_model_name, best_result
+
+
 @st.cache_data
 def load_project_outputs(days, portfolio_value, simulations):
-    """Run project calculations once and cache dashboard outputs."""
+    """Run project calculations and cache dashboard outputs."""
     prices = generate_synthetic_prices(days=days)
     returns = calculate_returns(prices)
 
@@ -80,10 +185,7 @@ def load_project_outputs(days, portfolio_value, simulations):
     mc_summary = monte_carlo_loss_summary(paths, portfolio_value)
 
     credit_df = generate_synthetic_credit_data(rows=2500)
-    model_results = train_credit_models(credit_df)
-
-    best_model_name = max(model_results, key=lambda name: model_results[name]["roc_auc"])
-    best_result = model_results[best_model_name]
+    model_results, comparison_df, best_model_name, best_result = train_credit_models_with_comparison(credit_df)
 
     ecl_summary = credit_stress_scenarios(
         base_pd=best_result["test_pd"],
@@ -100,6 +202,7 @@ def load_project_outputs(days, portfolio_value, simulations):
         "mc_summary": mc_summary,
         "credit_df": credit_df,
         "model_results": model_results,
+        "comparison_df": comparison_df,
         "best_model_name": best_model_name,
         "best_result": best_result,
         "ecl_summary": ecl_summary,
@@ -110,7 +213,7 @@ st.title("Integrated Market & Credit Risk Simulation Platform")
 
 st.caption(
     "Interactive Python dashboard combining market risk metrics, Monte Carlo simulation, "
-    "credit default prediction, and expected credit loss stress testing."
+    "credit default prediction, model comparison, SHAP explainability, and expected credit loss stress testing."
 )
 
 st.sidebar.header("Dashboard Controls")
@@ -145,11 +248,11 @@ risk_summary = outputs["risk_summary"]
 mc_summary = outputs["mc_summary"]
 paths = outputs["paths"]
 port_returns = outputs["portfolio_returns"]
-prices = outputs["prices"]
 credit_df = outputs["credit_df"]
 best_result = outputs["best_result"]
 best_model_name = outputs["best_model_name"]
 ecl_summary = outputs["ecl_summary"]
+comparison_df = outputs["comparison_df"]
 
 avg_pd = float(np.mean(best_result["test_pd"]))
 
@@ -157,47 +260,17 @@ st.subheader("Executive Risk Summary")
 
 col1, col2, col3, col4 = st.columns(4)
 
-col1.metric(
-    "Annualized Volatility",
-    f"{risk_summary['annualized_volatility']:.2%}",
-)
-
-col2.metric(
-    "95% VaR",
-    f"{risk_summary['var_95']:.2%}",
-)
-
-col3.metric(
-    "99% VaR",
-    f"{risk_summary['var_99']:.2%}",
-)
-
-col4.metric(
-    "Model ROC-AUC",
-    f"{best_result['roc_auc']:.3f}",
-)
+col1.metric("Annualized Volatility", f"{risk_summary['annualized_volatility']:.2%}")
+col2.metric("95% VaR", f"{risk_summary['var_95']:.2%}")
+col3.metric("99% VaR", f"{risk_summary['var_99']:.2%}")
+col4.metric("Best Model ROC-AUC", f"{best_result['roc_auc']:.3f}")
 
 col5, col6, col7, col8 = st.columns(4)
 
-col5.metric(
-    "Sharpe Ratio",
-    f"{risk_summary['sharpe_ratio']:.2f}",
-)
-
-col6.metric(
-    "Max Drawdown",
-    f"{risk_summary['max_drawdown']:.2%}",
-)
-
-col7.metric(
-    "Probability of Loss",
-    f"{mc_summary['probability_of_loss']:.2%}",
-)
-
-col8.metric(
-    "Avg Predicted PD",
-    f"{avg_pd:.2%}",
-)
+col5.metric("Sharpe Ratio", f"{risk_summary['sharpe_ratio']:.2f}")
+col6.metric("Max Drawdown", f"{risk_summary['max_drawdown']:.2%}")
+col7.metric("Probability of Loss", f"{mc_summary['probability_of_loss']:.2%}")
+col8.metric("Avg Predicted PD", f"{avg_pd:.2%}")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
@@ -238,6 +311,11 @@ with tab1:
         labels={"value": "Daily Return"},
     )
     st.plotly_chart(returns_fig, use_container_width=True)
+
+    st.info(
+        "Observation: most returns cluster around the average, while the far-left tail represents downside-risk observations. "
+        "Those tail losses drive VaR, Expected Shortfall, and stress-risk analysis."
+    )
 
 with tab2:
     st.subheader("Monte Carlo Portfolio Simulation")
@@ -283,13 +361,30 @@ with tab2:
     )
     st.plotly_chart(final_fig, use_container_width=True)
 
+    st.info(
+        "Observation: most simulated paths remain in a normal range, while a smaller number of paths show extreme downside outcomes. "
+        "These are valid tail-risk scenarios, not data errors."
+    )
+
 with tab3:
     st.subheader("Credit Risk Machine Learning")
 
-    st.write(f"Best Model: **{best_model_name}**")
-    st.write(f"ROC-AUC: **{best_result['roc_auc']:.4f}**")
+    st.write(f"Best Model Based on ROC-AUC: **{best_model_name}**")
+    st.write(f"Best Model ROC-AUC: **{best_result['roc_auc']:.4f}**")
     st.write(f"Average Probability of Default: **{avg_pd:.2%}**")
     st.write(f"Average Risk Band: **{assign_risk_band(avg_pd)}**")
+
+    st.write("Model Comparison: Logistic Regression vs Random Forest")
+    st.dataframe(comparison_df, use_container_width=True)
+
+    comparison_fig = px.bar(
+        comparison_df,
+        x="Model",
+        y=["ROC-AUC", "Accuracy", "Precision", "Recall", "F1 Score"],
+        barmode="group",
+        title="Credit Risk Model Performance Comparison",
+    )
+    st.plotly_chart(comparison_fig, use_container_width=True)
 
     credit_preview = credit_df.head(20)
     st.write("Sample Borrower Data")
@@ -308,12 +403,78 @@ with tab3:
     cm_fig = px.imshow(
         cm,
         text_auto=True,
-        title="Confusion Matrix",
+        title="Confusion Matrix for Best Credit Risk Model",
         labels=dict(x="Predicted", y="Actual", color="Count"),
         x=["Non-Default", "Default"],
         y=["Non-Default", "Default"],
     )
     st.plotly_chart(cm_fig, use_container_width=True)
+
+    st.subheader("SHAP Explanation for Credit Risk Model")
+
+    st.write(
+        "SHAP explainability helps identify which borrower features push predictions toward higher or lower default risk."
+    )
+
+    if SHAP_AVAILABLE:
+        rf_result = outputs["model_results"]["Random Forest"]
+        rf_model = rf_result["model"]
+        X_test = rf_result["X_test"]
+        features = rf_result["features"]
+
+        sample_size = min(200, len(X_test))
+        X_sample = X_test.sample(sample_size, random_state=42)
+
+        try:
+            explainer = shap.TreeExplainer(rf_model)
+            shap_values = explainer.shap_values(X_sample)
+
+            if isinstance(shap_values, list):
+                shap_values_for_default = shap_values[1]
+            elif len(np.array(shap_values).shape) == 3:
+                shap_values_for_default = np.array(shap_values)[:, :, 1]
+            else:
+                shap_values_for_default = shap_values
+
+            shap_importance = pd.DataFrame(
+                {
+                    "Feature": features,
+                    "Mean Absolute SHAP Value": np.abs(shap_values_for_default).mean(axis=0),
+                }
+            ).sort_values("Mean Absolute SHAP Value", ascending=False)
+
+            st.write("Top Features Driving Default Risk")
+            st.dataframe(shap_importance, use_container_width=True)
+
+            shap_fig = px.bar(
+                shap_importance,
+                x="Mean Absolute SHAP Value",
+                y="Feature",
+                orientation="h",
+                title="SHAP Feature Importance for Default Prediction",
+            )
+            shap_fig.update_layout(yaxis=dict(autorange="reversed"))
+            st.plotly_chart(shap_fig, use_container_width=True)
+
+            st.info(
+                "Interpretation: larger mean absolute SHAP values indicate features that have stronger influence on default-risk predictions. "
+                "Typical drivers include debt-to-income ratio, utilization, interest rate, delinquencies, income, and credit history."
+            )
+
+        except Exception as exc:
+            st.warning(
+                f"SHAP could not be calculated in this environment. Error: {exc}. "
+                "The model comparison table and confusion matrix are still available."
+            )
+    else:
+        st.warning(
+            "SHAP is not installed. Add `shap>=0.45` to requirements.txt, push to GitHub, and reboot Streamlit Cloud."
+        )
+
+    st.info(
+        "Credit-risk observation: high DTI, high utilization, higher interest rates, and multiple delinquencies create high-risk borrower profiles. "
+        "These are valid risk outliers rather than invalid data points."
+    )
 
 with tab4:
     st.subheader("Expected Credit Loss Stress Testing")
@@ -335,9 +496,24 @@ with tab4:
 
     st.info(
         "Expected Credit Loss is calculated using PD × LGD × EAD. "
-        "The stress scenarios increase default probability to estimate how losses may rise "
+        "The stress scenarios increase default probability to estimate how credit losses may rise "
         "during high-rate or recession environments."
     )
+
+    scenario_notes = pd.DataFrame(
+        {
+            "Scenario": ["baseline", "high_rate_environment", "mild_recession", "severe_recession"],
+            "Business Interpretation": [
+                "Normal market and credit environment.",
+                "Borrowers face higher interest-rate pressure.",
+                "Default probabilities rise due to weaker economic conditions.",
+                "Severe stress combines elevated default risk and larger expected losses.",
+            ],
+        }
+    )
+
+    st.write("Scenario Interpretation")
+    st.dataframe(scenario_notes, use_container_width=True)
 
 with tab5:
     st.subheader("Resume and Interview Explanation")
@@ -347,8 +523,9 @@ with tab5:
         ### Resume Bullet
 
         Built an integrated **Market & Credit Risk Simulation Platform** using Python, Pandas, NumPy,
-        Scikit-learn, and Monte Carlo simulation to estimate VaR, Expected Shortfall, portfolio drawdown risk,
-        borrower default probability, and expected credit loss under baseline, high-rate, and recession stress scenarios.
+        Scikit-learn, Monte Carlo simulation, Streamlit, and SHAP explainability to estimate VaR,
+        Expected Shortfall, portfolio drawdown risk, borrower default probability, model performance,
+        feature-level risk drivers, and expected credit loss under baseline, high-rate, and recession stress scenarios.
 
         ### Interview Explanation
 
@@ -362,6 +539,12 @@ with tab5:
 
         For **credit risk**, it generates borrower-level data and trains Logistic Regression
         and Random Forest models to predict Probability of Default.
+
+        For **model comparison**, it compares Logistic Regression and Random Forest using
+        ROC-AUC, accuracy, precision, recall, and F1-score.
+
+        For **explainability**, it uses SHAP feature importance to explain which borrower
+        variables contribute most to predicted default risk.
 
         For **stress testing**, it uses PD, LGD, and EAD to calculate Expected Credit Loss
         under baseline, high-rate, mild recession, and severe recession scenarios.
