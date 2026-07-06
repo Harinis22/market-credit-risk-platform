@@ -7,6 +7,15 @@ from sklearn.metrics import classification_report, confusion_matrix, roc_auc_sco
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 
 
 def generate_synthetic_credit_data(rows=2000, seed=42):
@@ -98,11 +107,18 @@ def train_credit_models(df):
 
         results[name] = {
             "model": model,
-            "roc_auc": float(roc_auc_score(y_test, default_probability)),
-            "confusion_matrix": confusion_matrix(y_test, predictions).tolist(),
-            "classification_report": classification_report(y_test, predictions, output_dict=True),
-            "test_pd": default_probability,
-            "test_ead": X_test["loan_amount"].to_numpy(),
+    "roc_auc": float(roc_auc_score(y_test, default_probability)),
+    "accuracy": float(accuracy_score(y_test, predictions)),
+    "precision": float(precision_score(y_test, predictions, zero_division=0)),
+    "recall": float(recall_score(y_test, predictions, zero_division=0)),
+    "f1_score": float(f1_score(y_test, predictions, zero_division=0)),
+    "confusion_matrix": confusion_matrix(y_test, predictions).tolist(),
+    "classification_report": classification_report(y_test, predictions, output_dict=True),
+    "test_pd": default_probability,
+    "test_ead": X_test["loan_amount"].to_numpy(),
+    "X_test": X_test,
+    "y_test": y_test,
+    "features": features,
         }
 
     return results
