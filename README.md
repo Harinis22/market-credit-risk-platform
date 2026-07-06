@@ -6,6 +6,8 @@ numpy>=1.24
 pandas>=2.0
 scikit-learn>=1.3
 matplotlib>=3.7
+streamlit>=1.35
+plotly>=5.20
 "@ | Set-Content requirements.txt
 
 # Integrated Market & Credit Risk Simulation Platform
@@ -133,3 +135,35 @@ Expected Credit Loss is calculated using:
 
 ```text
 Expected Credit Loss = Probability of Default × Loss Given Default × Exposure at Default
+
+## Interactive Dashboard
+
+This project includes a Streamlit dashboard for market risk, Monte Carlo simulation, credit risk modeling, and expected credit loss stress testing.
+
+Run the dashboard locally:
+
+```bash
+streamlit run dashboard.py
+
+##Dashboard views include:
+
+Market risk summary
+Portfolio cumulative return
+Daily return distribution
+Monte Carlo portfolio paths
+Credit model ROC-AUC
+Probability of default distribution
+Confusion matrix
+Expected Credit Loss stress scenarios
+
+
+---
+
+# Step 5: Push dashboard to GitHub
+
+```powershell
+git status
+git add .
+git commit -m "Add Streamlit risk dashboard"
+git pull --rebase origin main
+git push origin main
