@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # market-credit-risk-platform
 #libraries
 
